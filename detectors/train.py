@@ -47,10 +47,10 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, 
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
-        with autocast(enabled=cfg.useAmp and device.type == 'cuda'):
+        with (autocast(enabled=cfg.useAmp and device.type == 'cuda')):
             outputs = model(imgs)
             loss_box, loss_cls, loss_dfl = criterion(outputs, targets)
-            loss = loss_box + loss_cls + loss_dfl
+            loss = loss_box+ loss_cls + loss_dfl
 
         # Backward pass
         if cfg.useAmp and device.type == 'cuda':
@@ -298,7 +298,7 @@ def main(cfg):
 
     if last_ckpt.exists():
         print(f"Resuming from {last_ckpt}")
-        ckpt = torch.load(last_ckpt, map_location=device)
+        ckpt = torch.load(last_ckpt, map_location=device,weights_only=False)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         if ema and 'ema' in ckpt:

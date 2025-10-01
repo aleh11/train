@@ -11,22 +11,22 @@ load_dotenv()
 class TrainConfig:
 
     # Paths
-    dataRoot: str = '/content/cars/'
-    outDir: str ="/content/drive/MyDrive/myYOLOcars"
+    dataRoot: str = '/content/train/datasets/cars/'
+    outDir: str ="/content/drive/MyDrive/myYOLOcars2"
 
     # Data
     numClasses: Optional[int] = 2
     classNames: Optional[Tuple[str, ...]] = ("car", "plate")
     imageSize: int = 512                  # imgsz
     batchSize: int = 64                  # batch
-    workers: int = 6                      # workers
+    workers: int = 4                      # workers
 
     # Model
     regMax: int = 16
     strides: Tuple[int, int, int] = (8, 16, 32)
 
     # Optimization
-    epochs: int = 100                     # epochs
+    epochs: int = 160                     # epochs
     optimizer: str = "adamw"              # args.yaml had optimizer:auto; map to AdamW
     lr: float = 0.01
     lrf: float = 0.01
@@ -57,7 +57,7 @@ class TrainConfig:
 
     # Eval/export knobs you may use later
     iouThr: float = 0.7                   # iou
-    maxDet: int = 300                     # max_det
+    maxDet: int = 50                     # max_det
     half: bool = False                    # half
 
     # Fast run
