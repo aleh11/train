@@ -1,3 +1,5 @@
 datasets/cars/.DS_Store
 datasets/plates/test/.DS_Store
 *.DS_Store
+.idea
+*__pycache__

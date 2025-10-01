@@ -11,15 +11,15 @@ load_dotenv()
 class TrainConfig:
 
     # Paths
-    dataRoot: str = os.getenv("CARS_PATH")
-    outDir: str = os.getenv("CARS_WEIGHTS")
+    dataRoot: str = '/content/cars/'
+    outDir: str ="/content/drive/MyDrive/myYOLOcars"
 
     # Data
     numClasses: Optional[int] = 2
     classNames: Optional[Tuple[str, ...]] = ("car", "plate")
     imageSize: int = 512                  # imgsz
-    batchSize: int = 8                  # batch
-    workers: int = 1                      # workers
+    batchSize: int = 64                  # batch
+    workers: int = 6                      # workers
 
     # Model
     regMax: int = 16
