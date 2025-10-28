@@ -14,7 +14,7 @@ from YOLOv8n import YOLOv8Nano
 from cnn.dataset import Dataset
 from cnn.loss import ComputeLoss
 from cnn.metrics import compute_metric, compute_ap
-from cnn.scheduler import CosineLR
+from cnn.schedulers import CosineLR
 from cnn.utils import setup_seed, torchNMS, clip_gradients, AverageMeter
 
 
