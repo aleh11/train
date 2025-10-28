@@ -10,8 +10,8 @@ load_dotenv()
 @dataclass
 class TrainConfig:
     # Paths
-    dataRoot: str = os.getenv("OCR_PATH")  # must contain train/ and val/
-    outDir: str = os.getenv("OCR_WEIGHTS")  # where to save checkpoints
+    dataRoot: str = '/content/train/datasets/plates/'
+    outDir: str ="/content/drive/MyDrive/NOVEMBERTING"
 
     # Data
     numClasses: Optional[int] = 30  # set to your dataset
