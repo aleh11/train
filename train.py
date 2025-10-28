@@ -15,13 +15,13 @@ from cnn.dataset import Dataset
 from cnn.loss import ComputeLoss
 from cnn.metrics import compute_metric, compute_ap
 from cnn.utils import (
-    EMA, CosineLR, setup_seed,
+    CosineLR, setup_seed,
     torchNMS,
     clip_gradients, AverageMeter
 )
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, cfg, ema=None):
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, cfg):
     """Train for one epoch"""
     model.train()
 
@@ -61,10 +61,6 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, 
             loss.backward()
             clip_gradients(model, max_norm=cfg.maxGradNorm)
             optimizer.step()
-
-        # Update EMA
-        if ema is not None:
-            ema.update(model)
 
         # Update metrics
         loss_meter.update(loss.item(), bs)
@@ -320,11 +316,6 @@ def main(cfg):
 
     scheduler = CosineLR(Args(), scheduler_params, num_steps)
 
-    # EMA
-    use_ema = getattr(cfg, 'useEma', True)
-    ema_decay = getattr(cfg, 'emaDecay', 0.9999)
-    ema = EMA(model, decay=ema_decay) if use_ema else None
-
     # Mixed precision
     scaler = GradScaler(enabled=(cfg.useAmp and device.type == 'cuda'))
 
@@ -338,8 +329,6 @@ def main(cfg):
         ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
-        if ema and 'ema' in ckpt:
-            ema.ema.load_state_dict(ckpt['ema'])
         start_epoch = ckpt['epoch'] + 1
         best_loss = ckpt.get('best_loss', float('inf'))
         print(f"Resumed from epoch {start_epoch - 1}")
@@ -361,13 +350,12 @@ def main(cfg):
         # Train
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer,
-            scaler, device, epoch, cfg, ema
+            scaler, device, epoch, cfg
         )
 
         # Validate
-        val_model = ema.ema if ema else model
         val_metrics = validate(
-            val_model, val_loader, criterion,
+            model, val_loader, criterion,
             device, epoch, cfg
         )
 
@@ -420,8 +408,6 @@ def main(cfg):
             'cfg': vars(cfg),
             'best_loss': best_loss
         }
-        if ema:
-            ckpt['ema'] = ema.ema.state_dict()
 
         torch.save(ckpt, out_dir / 'last.pt')
 
