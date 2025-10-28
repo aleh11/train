@@ -427,4 +427,5 @@ if __name__ == '__main__':
     carsCfg = carsConfig.GetConfig()
     ocrCfg = ocrConfig.GetConfig()
     cars = False
+    ting=5
     main(carsCfg if cars else ocrCfg)
