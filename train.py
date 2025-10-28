@@ -14,14 +14,11 @@ from YOLOv8n import YOLOv8Nano
 from cnn.dataset import Dataset
 from cnn.loss import ComputeLoss
 from cnn.metrics import compute_metric, compute_ap
-from cnn.utils import (
-    CosineLR, setup_seed,
-    torchNMS,
-    clip_gradients, AverageMeter
-)
+from cnn.scheduler import CosineLR
+from cnn.utils import setup_seed, torchNMS, clip_gradients, AverageMeter
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, cfg):
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, cfg, scheduler):
     """Train for one epoch"""
     model.train()
 
@@ -62,6 +59,9 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, 
             clip_gradients(model, max_norm=cfg.maxGradNorm)
             optimizer.step()
 
+        # Step scheduler after each batch
+        scheduler.step()
+
         # Update metrics
         loss_meter.update(loss.item(), bs)
         box_meter.update(loss_box.item(), bs)
@@ -73,7 +73,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, 
             'box': f"{box_meter.avg:.3f}",
             'cls': f"{cls_meter.avg:.3f}",
             'dfl': f"{dfl_meter.avg:.3f}",
-            'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
+            'lr': f"{scheduler.get_last_lr():.2e}"
         })
 
     return {
@@ -304,17 +304,17 @@ def main(cfg):
         )
 
     # Build scheduler
-    num_steps = len(train_loader)
-    scheduler_params = {
-        'max_lr': cfg.lr,
-        'min_lr': cfg.minLr,
-        'warmup_epochs': cfg.warmupEpochs
-    }
+    steps_per_epoch = len(train_loader)
+    total_steps = cfg.epochs * steps_per_epoch
+    warmup_steps = int(cfg.warmupEpochs * steps_per_epoch)
 
-    class Args:
-        epochs = cfg.epochs
-
-    scheduler = CosineLR(Args(), scheduler_params, num_steps)
+    scheduler = CosineLR(
+        optimizer=optimizer,
+        max_lr=cfg.lr,
+        min_lr=cfg.minLr,
+        total_steps=total_steps,
+        warmup_steps=warmup_steps
+    )
 
     # Mixed precision
     scaler = GradScaler(enabled=(cfg.useAmp and device.type == 'cuda'))
@@ -331,6 +331,11 @@ def main(cfg):
         optimizer.load_state_dict(ckpt['optimizer'])
         start_epoch = ckpt['epoch'] + 1
         best_loss = ckpt.get('best_loss', float('inf'))
+
+        # Restore scheduler step count
+        steps_completed = (start_epoch - 1) * steps_per_epoch
+        scheduler.current_step = steps_completed
+
         print(f"Resumed from epoch {start_epoch - 1}")
 
     # CSV logging
@@ -350,7 +355,7 @@ def main(cfg):
         # Train
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer,
-            scaler, device, epoch, cfg
+            scaler, device, epoch, cfg, scheduler
         )
 
         # Validate
@@ -358,11 +363,6 @@ def main(cfg):
             model, val_loader, criterion,
             device, epoch, cfg
         )
-
-        # Step scheduler
-        for _ in range(num_steps):
-            step = (_ + num_steps * (epoch - 1))
-            scheduler.step(step, optimizer)
 
         elapsed = time.time() - t0
 
@@ -380,7 +380,7 @@ def main(cfg):
               f"mAP50-95={val_metrics['map50_95']:.4f} "
               f"P={val_metrics['precision']:.4f} "
               f"R={val_metrics['recall']:.4f} | "
-              f"lr={optimizer.param_groups[0]['lr']:.2e} | "
+              f"lr={scheduler.get_last_lr():.2e} | "
               f"{elapsed:.1f}s\n")
 
         # Log to CSV
@@ -397,7 +397,7 @@ def main(cfg):
                     f"{val_metrics['map50_95']:.6f},"
                     f"{val_metrics['precision']:.6f},"
                     f"{val_metrics['recall']:.6f},"
-                    f"{optimizer.param_groups[0]['lr']:.8f},"
+                    f"{scheduler.get_last_lr():.8f},"
                     f"{elapsed:.2f},{best_loss:.6f}\n")
 
         # Save checkpoints
@@ -426,6 +426,5 @@ if __name__ == '__main__':
 
     carsCfg = carsConfig.GetConfig()
     ocrCfg = ocrConfig.GetConfig()
-    cars = False
-    ting=5
+    cars = True
     main(carsCfg if cars else ocrCfg)
