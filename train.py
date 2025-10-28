@@ -11,9 +11,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from YOLOv8n import YOLOv8Nano
-from dataset import Dataset
-from utils import (
-    ComputeLoss, EMA, CosineLR, setup_seed,
+from cnn.dataset import Dataset
+from cnn.loss import ComputeLoss
+from cnn.utils import (
+    EMA, CosineLR, setup_seed,
     non_max_suppression, compute_metric, compute_ap,
     clip_gradients, AverageMeter
 )
