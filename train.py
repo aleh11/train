@@ -13,9 +13,10 @@ from tqdm import tqdm
 from YOLOv8n import YOLOv8Nano
 from cnn.dataset import Dataset
 from cnn.loss import ComputeLoss
+from cnn.metrics import compute_metric, compute_ap
 from cnn.utils import (
     EMA, CosineLR, setup_seed,
-    non_max_suppression, compute_metric, compute_ap,
+    torchNMS,
     clip_gradients, AverageMeter
 )
 
@@ -122,7 +123,7 @@ def validate(model, loader, criterion, device, epoch, cfg):
         conf_thresh = getattr(cfg, 'confThresh', 0.001)
         iou_thresh = getattr(cfg, 'iouThr', 0.7)
 
-        preds = non_max_suppression(
+        preds = torchNMS(
             eval_outputs,
             confidence_threshold=conf_thresh,
             iou_threshold=iou_thresh
