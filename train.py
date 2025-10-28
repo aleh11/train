@@ -1,20 +1,17 @@
-# train_yolo.py
+# train_yolo.py - YOLOv8 Training Pipeline with mAP Metrics
+
 import os
 import time
-import random
-import math
 from pathlib import Path
 from datetime import datetime
-
-import numpy as np
+import gc
 import torch
-import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from YOLOv8n import YOLOv8Nano
-from dataset import Dataset  # Using the big dataset file with mosaic, mixup, etc.
+from dataset import Dataset
 from utils import (
     ComputeLoss, EMA, CosineLR, setup_seed,
     non_max_suppression, compute_metric, compute_ap,
@@ -40,17 +37,16 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, 
             break
 
         imgs = imgs.to(device, non_blocking=True)
-        # targets is already a dict with 'cls', 'box', 'idx' keys
         targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
         bs = imgs.size(0)
 
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass
-        with (autocast(enabled=cfg.useAmp and device.type == 'cuda')):
+        with autocast(enabled=cfg.useAmp and device.type == 'cuda'):
             outputs = model(imgs)
             loss_box, loss_cls, loss_dfl = criterion(outputs, targets)
-            loss = loss_box+ loss_cls + loss_dfl
+            loss = loss_box + loss_cls + loss_dfl
 
         # Backward pass
         if cfg.useAmp and device.type == 'cuda':
@@ -92,7 +88,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch, 
 
 @torch.no_grad()
 def validate(model, loader, criterion, device, epoch, cfg):
-    """Validate the model"""
+    """Validate the model with proper mAP calculation"""
     model.eval()
 
     loss_meter = AverageMeter()
@@ -100,44 +96,68 @@ def validate(model, loader, criterion, device, epoch, cfg):
     cls_meter = AverageMeter()
     dfl_meter = AverageMeter()
 
+    # For mAP computation
+    iou_v = torch.linspace(0.5, 0.95, 10, device=device)
+    stats = []  # List of (correct, conf, pred_cls, target_cls)
+
     pbar = tqdm(loader, desc=f"Valid Epoch {epoch:03d}", unit="batch")
 
-    # For mAP computation
-    all_stats = []
-    iou_v = torch.linspace(0.5, 0.95, 10, device=device)
-
     for imgs, targets in pbar:
-        imgs = imgs.float() / 255.0
+        # Convert uint8 to float32 and normalize
         imgs = imgs.to(device, non_blocking=True)
         targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
         bs = imgs.size(0)
 
-        # IMPORTANT: Set to train mode for loss computation
+        # Get loss (need train mode outputs)
         model.train()
-        outputs = model(imgs)
-        loss_box, loss_cls, loss_dfl = criterion(outputs, targets)
+        train_outputs = model(imgs)
+        loss_box, loss_cls, loss_dfl = criterion(train_outputs, targets)
         loss = loss_box + loss_cls + loss_dfl
 
-        # Switch back to eval mode for NMS
+        # Get predictions (need eval mode outputs)
         model.eval()
-        # Get predictions for mAP (need to run forward again in eval mode)
-        with torch.no_grad():
-            preds_for_nms = model(imgs)
+        eval_outputs = model(imgs)
 
         conf_thresh = getattr(cfg, 'confThresh', 0.001)
         iou_thresh = getattr(cfg, 'iouThr', 0.7)
 
         preds = non_max_suppression(
-            preds_for_nms,
+            eval_outputs,
             confidence_threshold=conf_thresh,
             iou_threshold=iou_thresh
         )
 
-        # Update metrics
+        # Update loss metrics
         loss_meter.update(loss.item(), bs)
         box_meter.update(loss_box.item(), bs)
         cls_meter.update(loss_cls.item(), bs)
         dfl_meter.update(loss_dfl.item(), bs)
+
+        # Compute mAP statistics per image
+        img_size = cfg.imageSize
+        for i, pred in enumerate(preds):
+            # Get ground truth for this image
+            gt_mask = targets['idx'] == i
+            if gt_mask.sum() == 0:
+                continue
+
+            gt_cls = targets['cls'][gt_mask]  # (n_gt, 1)
+            gt_box = targets['box'][gt_mask]  # (n_gt, 4) in normalized xywh
+
+            # Convert GT from normalized xywh to pixel xyxy
+            gt_box_xyxy = torch.zeros_like(gt_box)
+            gt_box_xyxy[:, 0] = (gt_box[:, 0] - gt_box[:, 2] / 2) * img_size  # x1
+            gt_box_xyxy[:, 1] = (gt_box[:, 1] - gt_box[:, 3] / 2) * img_size  # y1
+            gt_box_xyxy[:, 2] = (gt_box[:, 0] + gt_box[:, 2] / 2) * img_size  # x2
+            gt_box_xyxy[:, 3] = (gt_box[:, 1] + gt_box[:, 3] / 2) * img_size  # y2
+
+            # Combine class and box for compute_metric format
+            labels = torch.cat([gt_cls, gt_box_xyxy], dim=1)  # (n_gt, 5)
+
+            if len(pred):
+                # pred format: (n_pred, 6) [x1, y1, x2, y2, conf, cls]
+                correct = compute_metric(pred, labels, iou_v)
+                stats.append((correct, pred[:, 4].cpu(), pred[:, 5].cpu(), gt_cls.cpu()))
 
         pbar.set_postfix({
             'loss': f"{loss_meter.avg:.3f}",
@@ -146,11 +166,24 @@ def validate(model, loader, criterion, device, epoch, cfg):
             'dfl': f"{dfl_meter.avg:.3f}"
         })
 
+    # Compute mAP from collected stats
+    map50, map50_95, precision, recall = 0.0, 0.0, 0.0, 0.0
+    if len(stats):
+        stats_concat = [torch.cat(x, 0).cpu().numpy() for x in zip(*stats)]
+        if len(stats_concat) and stats_concat[0].any():
+            tp, fp, m_pre, m_rec, map50, map50_95 = compute_ap(*stats_concat)
+            precision = m_pre
+            recall = m_rec
+
     return {
         'loss': loss_meter.avg,
         'box_loss': box_meter.avg,
         'cls_loss': cls_meter.avg,
-        'dfl_loss': dfl_meter.avg
+        'dfl_loss': dfl_meter.avg,
+        'map50': map50,
+        'map50_95': map50_95,
+        'precision': precision,
+        'recall': recall
     }
 
 
@@ -223,7 +256,8 @@ def main(cfg):
         num_workers=cfg.workers,
         pin_memory=True,
         collate_fn=Dataset.collate_fn,
-        drop_last=True
+        drop_last=True,
+        persistent_workers=False
     )
 
     val_loader = DataLoader(
@@ -232,7 +266,8 @@ def main(cfg):
         shuffle=False,
         num_workers=cfg.workers,
         pin_memory=True,
-        collate_fn=Dataset.collate_fn
+        collate_fn=Dataset.collate_fn,
+        persistent_workers=False
     )
 
     print(f"Train: {len(train_dataset)} images, Val: {len(val_dataset)} images")
@@ -284,7 +319,7 @@ def main(cfg):
     scheduler = CosineLR(Args(), scheduler_params, num_steps)
 
     # EMA
-    use_ema = getattr(cfg, 'useEma', True)  # Default to True if not in config
+    use_ema = getattr(cfg, 'useEma', True)
     ema_decay = getattr(cfg, 'emaDecay', 0.9999)
     ema = EMA(model, decay=ema_decay) if use_ema else None
 
@@ -298,7 +333,7 @@ def main(cfg):
 
     if last_ckpt.exists():
         print(f"Resuming from {last_ckpt}")
-        ckpt = torch.load(last_ckpt, map_location=device,weights_only=False)
+        ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         if ema and 'ema' in ckpt:
@@ -311,7 +346,9 @@ def main(cfg):
     log_path = stats_dir / f"yolov8n_{cfg.epochs}e_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     with open(log_path, 'w') as f:
         f.write('epoch,train_loss,train_box,train_cls,train_dfl,'
-                'val_loss,val_box,val_cls,val_dfl,lr,time_sec,best_loss\n')
+                'val_loss,val_box,val_cls,val_dfl,'
+                'map50,map50_95,precision,recall,'
+                'lr,time_sec,best_loss\n')
 
     # Training loop
     print(f"\nStarting training for {cfg.epochs} epochs...")
@@ -348,7 +385,11 @@ def main(cfg):
               f"Val: loss={val_metrics['loss']:.4f} "
               f"box={val_metrics['box_loss']:.4f} "
               f"cls={val_metrics['cls_loss']:.4f} "
-              f"dfl={val_metrics['dfl_loss']:.4f} | "
+              f"dfl={val_metrics['dfl_loss']:.4f} "
+              f"mAP50={val_metrics['map50']:.4f} "
+              f"mAP50-95={val_metrics['map50_95']:.4f} "
+              f"P={val_metrics['precision']:.4f} "
+              f"R={val_metrics['recall']:.4f} | "
               f"lr={optimizer.param_groups[0]['lr']:.2e} | "
               f"{elapsed:.1f}s\n")
 
@@ -362,6 +403,10 @@ def main(cfg):
                     f"{val_metrics['box_loss']:.6f},"
                     f"{val_metrics['cls_loss']:.6f},"
                     f"{val_metrics['dfl_loss']:.6f},"
+                    f"{val_metrics['map50']:.6f},"
+                    f"{val_metrics['map50_95']:.6f},"
+                    f"{val_metrics['precision']:.6f},"
+                    f"{val_metrics['recall']:.6f},"
                     f"{optimizer.param_groups[0]['lr']:.8f},"
                     f"{elapsed:.2f},{best_loss:.6f}\n")
 
@@ -381,7 +426,7 @@ def main(cfg):
         if val_metrics['loss'] < best_loss:
             best_loss = val_metrics['loss']
             torch.save(ckpt, out_dir / 'best.pt')
-            print(f"✓ Saved best model (loss={best_loss:.4f})")
+            print(f"Saved best model (loss={best_loss:.4f})")
 
     print(f"\nTraining complete! Best loss: {best_loss:.4f}")
     print(f"Checkpoints saved to: {out_dir}")
